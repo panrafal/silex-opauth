@@ -1,16 +1,24 @@
 <?php
 
-namespace SilexOpauth;
+namespace SilexOpauth; // Non psr-0 namespace usage. :(
 
+
+use Opauth;
 use Silex\Application;
 use Silex\ServiceProviderInterface;
-use Opauth; // Non psr-0 namespace usage. :(
+use Symfony\Component\EventDispatcher\GenericEvent;
 
 class OpauthExtension implements ServiceProviderInterface {
 
+    /** @var Application */
+    protected $app;
     protected $serviceConfig;
+    
+    const EVENT_ERROR = 'opauth.error';
+    const EVENT_SUCCESS = 'opauth.success';
 
     public function register(Application $app) {
+        $this->app = $app;
         $this->serviceConfig = $app['opauth'];
         $this->serviceConfig['config'] = array_merge(
                 array(
@@ -19,15 +27,17 @@ class OpauthExtension implements ServiceProviderInterface {
                     'callback_transport' => 'post' // Won't work with silex session
                 ), $app['opauth']['config']
             );
+        
+        $app->match($this->serviceConfig['callback'], function() { return $this->loginCallback(); });
+        
+        $app->match($this->serviceConfig['login'] . '/{strategy}', function() { return $this->loginAction(); });
+        $app->match($this->serviceConfig['login'] . '/{strategy}/{return}', function() { return $this->loginAction(); });
 
-        $app->match($this->serviceConfig['login'] . '/{strategy}', array($this, 'loginAction'));
-        $app->match($this->serviceConfig['login'] . '/{strategy}/{return}', array($this, 'loginAction'));
-
-        $app->match($this->serviceConfig['callback'], array($this, 'loginCallback'));
     }
 
     protected function loginAction() {
         new Opauth($this->serviceConfig['config']);
+        return '';
     }
     
     protected function loginCallback() {
@@ -40,7 +50,7 @@ class OpauthExtension implements ServiceProviderInterface {
          * Check if it's an error callback
          */
         if (array_key_exists('error', $response)) {
-            echo '<strong style="color: red;">Authentication error: </strong> Opauth returns error auth response.' . "<br>\n";
+            return $this->onAuthenticationError($response['error'], $response);
         }
 
         /**
@@ -50,27 +60,29 @@ class OpauthExtension implements ServiceProviderInterface {
          * is sent through GET or POST.
          */ else {
             if (empty($response['auth']) || empty($response['timestamp']) || empty($response['signature']) || empty($response['auth']['provider']) || empty($response['auth']['uid'])) {
-                echo '<strong style="color: red;">Invalid auth response: </strong>Missing key auth response components.' . "<br>\n";
+                return $this->onAuthenticationError('Missing key auth response components', $response);
             } elseif (!$Opauth->validate(sha1(print_r($response['auth'], true)), $response['timestamp'], $response['signature'], $failureReason)) {
-                echo '<strong style="color: red;">Invalid auth response: </strong>' . $failureReason . ".<br>\n";
+                return $this->onAuthenticationError($failureReason, $response);
             } else {
-                echo '<strong style="color: green;">OK: </strong>Auth response is validated.' . "<br>\n";
-
-                /**
-                 * It's all good. Go ahead with your application-specific authentication logic
-                 */
+                return $this->onAuthenticationSuccess($response);
             }
         }
-
-
-        /**
-         * Auth response dump
-         */
-        echo "<pre>";
-        print_r($response);
-        echo "</pre>";
+        
+        return '';
     }
 
+    protected function onAuthenticationError($message, $response) {
+        $e = new GenericEvent($response, array('message' => $message));
+        $e->setArgument('result', '');
+        return $this->app['dispatcher']->dispatch(self::EVENT_ERROR, $e)->getArgument('result');
+    }
+    
+    protected function onAuthenticationSuccess($response) {
+        $e = new GenericEvent($response);
+        $e->setArgument('result', '');
+        return $this->app['dispatcher']->dispatch(self::EVENT_SUCCESS, $e)->getArgument('result');
+    }
+    
     public function boot(Application $app) {
         
     }
